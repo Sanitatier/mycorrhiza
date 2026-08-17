@@ -307,27 +307,53 @@
     if(plantCount() >= plantCap()) return;
     const color = ROOT_PALETTE[Math.floor(rand(0,ROOT_PALETTE.length))];
     const sy = surfaceY();
-    drawSprout(x, sy);
     const b = makeBranch(0, x, sy, Math.PI/2 + rand(-0.15,0.15), color, null, null);
     b.plantId = b;
+    b.originX = x;
+    b.sproutTopY = rand(2,6);
     branches.push(b);
+    renderSprout(b);
   }
 
-  function drawSprout(x, sy){
-    const topY = rand(2,6);
-    gctx.strokeStyle = '#6b9c52';
-    gctx.lineWidth = rand(1.6,2.4);
-    gctx.lineCap = 'round';
-    gctx.beginPath(); gctx.moveTo(x, sy); gctx.lineTo(x + rand(-2,2), topY); gctx.stroke();
-    gctx.strokeStyle = '#5a8a44';
-    gctx.lineWidth = 1.2;
-    for(let i=0;i<2;i++){
-      const sign = i===0 ? -1 : 1;
-      gctx.beginPath();
-      gctx.moveTo(x, (sy+topY)/2);
-      gctx.quadraticCurveTo(x+sign*6, topY+2, x+sign*9, topY-2);
-      gctx.stroke();
+  // the visible above-ground stem: thickens together with the root, yellows as the
+  // root ages, dries out further once mature, and can be erased just before it dies
+  function renderSprout(b){
+    const sy = surfaceY();
+    const w = clamp(b.baseWidth*0.55, 1.8, 7);
+    let stemColor, leafy;
+    if(b.state === 'growing'){
+      const t = clamp(b.age / b.maxLife, 0, 1);
+      stemColor = lerpColor('#6b9c52', '#c9a227', t*0.85);
+      leafy = true;
+    } else {
+      const t2 = clamp(b.matureTimer / b.matureDuration, 0, 1);
+      stemColor = lerpColor('#c9a227', '#7a5a34', t2);
+      leafy = t2 < 0.5;
     }
+    const x = b.originX, topY = b.sproutTopY;
+
+    gctx.strokeStyle = stemColor;
+    gctx.lineWidth = w;
+    gctx.lineCap = 'round';
+    gctx.beginPath(); gctx.moveTo(x, sy+1); gctx.lineTo(x, topY); gctx.stroke();
+
+    if(leafy){
+      gctx.strokeStyle = lerpColor('#5a8a44', stemColor, 0.35);
+      gctx.lineWidth = Math.max(1, w*0.5);
+      for(let i=0;i<2;i++){
+        const sign = i===0 ? -1 : 1;
+        gctx.beginPath();
+        gctx.moveTo(x, (sy+topY)/2);
+        gctx.quadraticCurveTo(x+sign*6, topY+2, x+sign*9, topY-2);
+        gctx.stroke();
+      }
+    }
+  }
+
+  function eraseSprout(b){
+    const sy = surfaceY();
+    gctx.fillStyle = '#050302';
+    gctx.fillRect(b.originX - 13, 0, 26, sy+2);
   }
 
   function spawnChildBranch(parent){
@@ -474,22 +500,27 @@
         }
       }
 
-      if(frame % 40 === 0) thickenRedraw(b);
+      if(frame % 40 === 0){
+        thickenRedraw(b);
+        if(b.order===0) renderSprout(b);
+      }
 
       const timeUp = !boostRes && b.age > b.maxLife;
       if(timeUp || b.y > H+10 || b.x < -30 || b.x > W+30 || b.baseWidth < 0.3){
         b.path.push({x:b.x,y:b.y});
         thickenRedraw(b);
         b.state = 'mature';
+        if(b.order===0) renderSprout(b);
       }
     } else if(b.state === 'mature'){
       b.matureTimer++;
+      if(b.order===0 && b.matureTimer % 40 === 0) renderSprout(b);
       if(b.matureTimer > b.matureDuration){
         b.state = 'decaying';
         severBranchFromFungus(b);
         const dur = clamp(b.path.length*rand(3.5,5.5), 100, 1400);
         b.decayDots = Math.max(1, Math.ceil(b.path.length/dur));
-        if(b.order === 0) killDescendants(b);
+        if(b.order === 0){ killDescendants(b); eraseSprout(b); }
       }
     } else if(b.state === 'decaying'){
       for(let k=0;k<b.decayDots && b.decayIndex < b.path.length;k++){
