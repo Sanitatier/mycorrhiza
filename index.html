@@ -26,7 +26,7 @@
   #overlay .tag { font-size: 11px; margin-top: 4px; opacity: 0.7; }
   #vignette {
     position: fixed; inset: 0; z-index: 4; pointer-events: none;
-    background: radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,0.55) 100%);
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0) 45%, rgba(0,0,0,0.42) 80%, rgba(0,0,0,0.68) 100%);
   }
 </style>
 </head>
@@ -59,33 +59,53 @@
   function chance(p){ return Math.random() < p; }
   function angDiff(a,b){ let d = (b-a) % (Math.PI*2); if(d>Math.PI) d-=Math.PI*2; if(d<-Math.PI) d+=Math.PI*2; return d; }
   function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+  function hexToRgb(hex){ const v=parseInt(hex.slice(1),16); return [(v>>16)&255,(v>>8)&255,v&255]; }
+  function lerpColor(hexA,hexB,t){
+    const a=hexToRgb(hexA), b=hexToRgb(hexB);
+    const r=Math.round(a[0]+(b[0]-a[0])*t), g=Math.round(a[1]+(b[1]-a[1])*t), bl=Math.round(a[2]+(b[2]-a[2])*t);
+    return `rgb(${r},${g},${bl})`;
+  }
+  function roundRect(ctx,x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
 
   // ---------- palettes ----------
   const GRANULE_COLORS = ['#2a1c12','#3b2818','#241a10','#4a3220','#1a120b','#2f2013'];
   const PEBBLE_COLORS  = ['#5c5c58','#6e6a62','#4a4844','#767068'];
   const ROOT_PALETTE   = ['#a97a3d','#c9a227','#e8e2d0','#7a9b57','#8b5a2b'];
   const GLOW_COLOR     = '#f2d675';
+  const SOIL_DARK      = '#241a10';
   const SPECIES = {
     blue: { hypha: '#7fb3cf', core: '#bcd9e6' },
     pink: { hypha: '#cf82ac', core: '#ecc0dc' }
   };
-  const DEATH_THRESHOLD = 6; // connected-plant deaths (or equivalent grazing damage) that kill a fungal body
+  const DEATH_THRESHOLD = 6;
 
-  // per-order root parameters. Root growth speed is intentionally well below hyphae growth speed.
   const ROOT_ORDER = [
-    { wStart:2.6, wMax:8.0,  sec:0.0020, tipFrac:0.5,  life:[2600,3800], branchIv:[45,90],  jitter:0.045, gravity:0.020, canBranch:true,  speed:[0.10,0.16] },
-    { wStart:1.2, wMax:3.6,  sec:0.0009, tipFrac:0.45, life:[1200,2000], branchIv:[55,110], jitter:0.06,  gravity:0.009, canBranch:true,  speed:[0.08,0.13] },
-    { wStart:0.55,wMax:1.6,  sec:0.0003, tipFrac:0.4,  life:[500,1000],  branchIv:[9999,9999],jitter:0.08,gravity:0.004, canBranch:false, speed:[0.06,0.10] }
+    { wStart:2.6, wMax:8.0,  sec:0.0020, tipFrac:0.5,  life:[4200,6200], branchIv:[45,90],  jitter:0.028, gravity:0.020, canBranch:true,  speed:[0.06,0.10] },
+    { wStart:1.2, wMax:3.6,  sec:0.0009, tipFrac:0.45, life:[2000,3200], branchIv:[55,110], jitter:0.038, gravity:0.009, canBranch:true,  speed:[0.045,0.075] },
+    { wStart:0.55,wMax:1.6,  sec:0.0003, tipFrac:0.4,  life:[900,1600],  branchIv:[9999,9999],jitter:0.05,gravity:0.004, canBranch:false, speed:[0.035,0.06] }
   ];
 
   function plantCap(){ return Math.round(clamp(W*H/130000, 5, 15)); }
   function colonyCap(){ return Math.round(clamp(W*H/140000, 5, 15)); }
 
   // ---------- state ----------
-  let branches = [];      // root system (order 0/1/2), tree via flat list
-  let hyphae = [];        // fungal hyphae tips
-  let fungalBodies = [];  // mycelium colonies
+  let branches = [];
+  let hyphae = [];
+  let fungalBodies = [];
+  let resources = [];
+  let bubbles = [];
+  let remains = [];   // uneaten root decay matter, worm food
+  let cocoons = [];
   let creatures = [];
+  let junctions = []; // gold mycorrhiza-junction markers, tied to their root branch
   let pulses = [];
   let frame = 0;
 
@@ -101,28 +121,37 @@
     fctx.setTransform(DPR,0,0,DPR,0,0);
     drawSoil();
     gctx.clearRect(0,0,W,H);
-    branches = []; hyphae = []; fungalBodies = []; pulses = [];
+    branches=[]; hyphae=[]; fungalBodies=[]; resources=[]; bubbles=[]; remains=[]; cocoons=[]; junctions=[]; pulses=[];
     seedWorld();
   }
 
   // ---------- soil background ----------
+  function surfaceY(){ return clamp(H*0.035, 16, 40); }
+
   function drawSoil(){
+    const sy = surfaceY();
     const g = bctx.createLinearGradient(0,0,0,H);
     g.addColorStop(0, '#1b120c');
     g.addColorStop(1, '#0a0705');
     bctx.fillStyle = g;
     bctx.fillRect(0,0,W,H);
 
+    // dark band above ground level, like the cut-away view in the reference photo
+    bctx.fillStyle = '#050302';
+    bctx.fillRect(0,0,W,sy);
+    bctx.fillStyle = 'rgba(130,110,80,0.3)';
+    bctx.fillRect(0,sy-1,W,2);
+
     for(let i=0;i<Math.floor(W*H/1800);i++){
       bctx.fillStyle = GRANULE_COLORS[Math.floor(rand(0,GRANULE_COLORS.length))];
       bctx.globalAlpha = rand(0.3,0.8);
-      const x = rand(0,W), y = rand(0,H), r = rand(0.6,2.4);
+      const x = rand(0,W), y = rand(sy,H), r = rand(0.6,2.4);
       bctx.beginPath(); bctx.ellipse(x,y,r,r*rand(0.7,1.2),rand(0,6.28),0,6.28); bctx.fill();
     }
     bctx.globalAlpha = 1;
 
     for(let i=0;i<Math.floor(W*H/45000);i++){
-      const x = rand(0,W), y = rand(0,H), r = rand(3,9);
+      const x = rand(0,W), y = rand(sy,H), r = rand(3,9);
       bctx.fillStyle = PEBBLE_COLORS[Math.floor(rand(0,PEBBLE_COLORS.length))];
       bctx.beginPath(); bctx.ellipse(x,y,r,r*rand(0.7,1),rand(0,6.28),0,6.28); bctx.fill();
       bctx.fillStyle = 'rgba(255,255,255,0.06)';
@@ -131,7 +160,7 @@
 
     bctx.strokeStyle = 'rgba(90,68,44,0.18)';
     for(let i=0;i<Math.floor(W*H/90000);i++){
-      let x = rand(0,W), y = rand(0,H);
+      let x = rand(0,W), y = rand(sy,H);
       bctx.beginPath(); bctx.moveTo(x,y);
       const segs = Math.floor(rand(3,7));
       for(let s=0;s<segs;s++){ x += rand(-40,40); y += rand(-25,25); bctx.lineTo(x,y); }
@@ -141,12 +170,11 @@
 
     for(let i=0;i<Math.floor(W*H/9000);i++){
       bctx.fillStyle = 'rgba(150,125,90,0.05)';
-      const x = rand(0,W), y = rand(0,H);
+      const x = rand(0,W), y = rand(sy,H);
       bctx.beginPath(); bctx.arc(x,y,rand(0.5,1.4),0,6.28); bctx.fill();
     }
   }
 
-  // place a soil-matching granule dot (used for decay/dissolve of roots and dead mycelium)
   function soilDot(x,y,r){
     gctx.fillStyle = GRANULE_COLORS[Math.floor(rand(0,GRANULE_COLORS.length))];
     gctx.globalAlpha = rand(0.55,0.95);
@@ -155,13 +183,99 @@
     gctx.globalAlpha = 1;
   }
 
+  // ---------- root decay remains (worm food) ----------
+  function addRemain(x,y,r){
+    gctx.fillStyle = '#4a3220';
+    gctx.globalAlpha = rand(0.6,0.85);
+    gctx.beginPath(); gctx.ellipse(x+rand(-1.2,1.2), y+rand(-1.2,1.2), r*rand(0.8,1.1), r*rand(0.7,1), rand(0,6.28), 0, 6.28);
+    gctx.fill(); gctx.globalAlpha = 1;
+    remains.push({x,y,r,age:0,maxAge:rand(2200,4200)});
+  }
+
+  function nearestRemain(x,y,maxDist){
+    let best=null, bestD=maxDist;
+    for(const rm of remains){
+      const d = Math.hypot(rm.x-x, rm.y-y);
+      if(d<bestD){ bestD=d; best=rm; }
+    }
+    return best;
+  }
+
+  // ---------- moisture / resource pockets ----------
+  function drawResource(r){
+    let core, dust;
+    if(r.tint==='blue'){ core='#a8c6ff'; dust='#5f7fd6'; }
+    else if(r.tint==='purple'){ core='#c9a8ff'; dust='#7a55b8'; }
+    else { core='#ffd9a0'; dust='#c98a45'; } // amber (cocoon-born)
+
+    gctx.save();
+    gctx.translate(r.x,r.y); gctx.rotate(r.rot);
+    gctx.globalCompositeOperation = 'lighter';
+
+    // soft ambient haze filling the whole pocket
+    const haze = gctx.createRadialGradient(0,0,0,0,0,Math.max(r.rx,r.ry));
+    haze.addColorStop(0, hexToRgba(dust,0.22));
+    haze.addColorStop(1, hexToRgba(dust,0));
+    gctx.fillStyle = haze;
+    gctx.beginPath(); gctx.ellipse(0,0,r.rx,r.ry,0,0,6.28); gctx.fill();
+
+    // scattered glowing dust particles, like the nebula clusters in the reference
+    const n = Math.floor(r.rx*r.ry/55);
+    for(let i=0;i<n;i++){
+      const a = rand(0,6.28);
+      const rad = Math.sqrt(rand(0,1));
+      const px = Math.cos(a)*r.rx*rad, py = Math.sin(a)*r.ry*rad;
+      const pr = rand(0.6,2.2);
+      const bright = chance(0.18);
+      const grad = gctx.createRadialGradient(px,py,0,px,py,pr*(bright?3:1.6));
+      grad.addColorStop(0, hexToRgba(bright?core:dust, bright?0.9:0.55));
+      grad.addColorStop(1, hexToRgba(bright?core:dust, 0));
+      gctx.fillStyle = grad;
+      gctx.beginPath(); gctx.arc(px,py,pr*(bright?3:1.6),0,6.28); gctx.fill();
+    }
+    gctx.restore();
+  }
+
+  function spawnResources(){
+    const n = Math.floor(rand(3,5));
+    for(let i=0;i<n;i++){
+      const r = {
+        x: rand(W*0.12,W*0.88), y: rand(H*0.76,H*0.95),
+        rx: rand(38,80), ry: rand(9,15), rot: rand(-0.2,0.2),
+        tint: chance(0.5) ? 'blue' : 'purple',
+        amount: rand(550,900), gone:false
+      };
+      resources.push(r);
+      drawResource(r);
+    }
+  }
+
+  function nearestResource(x,y,maxDist){
+    let best=null, bestD=maxDist;
+    for(const r of resources){
+      if(r.gone || r.amount<=0) continue;
+      const d = Math.hypot(r.x-x,r.y-y);
+      if(d<bestD){ bestD=d; best=r; }
+    }
+    return best;
+  }
+
+  function checkResourceDepletion(r){
+    if(r.gone || r.amount>0) return;
+    r.gone = true;
+    for(let i=0;i<18;i++){
+      const a = rand(0,6.28), rad = rand(0,Math.max(r.rx,r.ry));
+      soilDot(r.x+Math.cos(a)*rad, r.y+Math.sin(a)*rad*0.6, rand(1.5,3));
+    }
+  }
+
   // ---------- root branches ----------
   function makeBranch(order, x, y, angle, color, parentWidth, plantId){
     const cfg = ROOT_ORDER[order];
     return {
       order, x, y, angle, color,
-      plantId: order===0 ? null : plantId,          // set to self below for order 0
-      associatedBodies: order===0 ? new Set() : null, // fungal bodies connected anywhere on this plant
+      plantId: order===0 ? null : plantId,
+      associatedBodies: order===0 ? new Set() : null,
       connectedBody: null,
       speed: rand(cfg.speed[0], cfg.speed[1]),
       baseWidth: parentWidth ? parentWidth*0.42 : cfg.wStart,
@@ -171,11 +285,13 @@
       distSinceSample: 0,
       branchAccum: 0,
       branchInterval: rand(cfg.branchIv[0], cfg.branchIv[1]),
+      noduleAccum: 0,
+      noduleInterval: rand(45,75),
       maxLife: rand(cfg.life[0], cfg.life[1]),
       age: 0,
-      state: 'growing',   // growing -> mature -> decaying -> gone
+      state: 'growing',
       matureTimer: 0,
-      matureDuration: rand(500,1100),
+      matureDuration: rand(1600,3200),
       decayIndex: 0,
       decayDots: 1,
       connected: false,
@@ -190,9 +306,28 @@
   function spawnRoot(x){
     if(plantCount() >= plantCap()) return;
     const color = ROOT_PALETTE[Math.floor(rand(0,ROOT_PALETTE.length))];
-    const b = makeBranch(0, x, -4, Math.PI/2 + rand(-0.15,0.15), color, null, null);
-    b.plantId = b; // a plant's identity is its main taproot object
+    const sy = surfaceY();
+    drawSprout(x, sy);
+    const b = makeBranch(0, x, sy, Math.PI/2 + rand(-0.15,0.15), color, null, null);
+    b.plantId = b;
     branches.push(b);
+  }
+
+  function drawSprout(x, sy){
+    const topY = rand(2,6);
+    gctx.strokeStyle = '#6b9c52';
+    gctx.lineWidth = rand(1.6,2.4);
+    gctx.lineCap = 'round';
+    gctx.beginPath(); gctx.moveTo(x, sy); gctx.lineTo(x + rand(-2,2), topY); gctx.stroke();
+    gctx.strokeStyle = '#5a8a44';
+    gctx.lineWidth = 1.2;
+    for(let i=0;i<2;i++){
+      const sign = i===0 ? -1 : 1;
+      gctx.beginPath();
+      gctx.moveTo(x, (sy+topY)/2);
+      gctx.quadraticCurveTo(x+sign*6, topY+2, x+sign*9, topY-2);
+      gctx.stroke();
+    }
   }
 
   function spawnChildBranch(parent){
@@ -208,28 +343,74 @@
   function thickenRedraw(b){
     const n = b.path.length;
     if(n < 2) return;
-    gctx.lineCap = 'round';
     gctx.strokeStyle = b.color;
+    gctx.lineCap = 'round';
+    gctx.lineJoin = 'round';
     gctx.globalAlpha = 0.92;
-    for(let i=1;i<n;i++){
+    if(n === 2){
+      gctx.lineWidth = Math.max(0.4, b.baseWidth);
+      gctx.beginPath(); gctx.moveTo(b.path[0].x,b.path[0].y); gctx.lineTo(b.path[1].x,b.path[1].y); gctx.stroke();
+      gctx.globalAlpha = 1;
+      return;
+    }
+    // smooth curve through the recorded points (quadratic through segment midpoints)
+    for(let i=1;i<n-1;i++){
       const t = i/n;
       const w = b.baseWidth * (1 - t*(1-b.tipFrac));
       gctx.lineWidth = Math.max(0.4, w);
+      const p0 = b.path[i-1], p1 = b.path[i], p2 = b.path[i+1];
+      const midA = {x:(p0.x+p1.x)/2, y:(p0.y+p1.y)/2};
+      const midB = {x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2};
       gctx.beginPath();
-      gctx.moveTo(b.path[i-1].x, b.path[i-1].y);
-      gctx.lineTo(b.path[i].x, b.path[i].y);
+      gctx.moveTo(midA.x, midA.y);
+      gctx.quadraticCurveTo(p1.x, p1.y, midB.x, midB.y);
       gctx.stroke();
     }
     gctx.globalAlpha = 1;
   }
 
-  // detach a dying branch from whatever fungal body it was feeding, killing the hyphae that fed on it
+  // small bean-like nodule along a thicker root, like the beads on the reference photo
+  function drawNodule(x,y,w){
+    const r = Math.max(1.6, w*0.85);
+    gctx.save();
+    gctx.translate(x,y);
+    const grad = gctx.createRadialGradient(-r*0.3,-r*0.3,0, 0,0, r);
+    grad.addColorStop(0, '#e7d9b8');
+    grad.addColorStop(0.6, '#c9b384');
+    grad.addColorStop(1, '#8a744f');
+    gctx.fillStyle = grad;
+    gctx.beginPath(); gctx.ellipse(0,0, r, r*1.3, 0, 0, 6.28); gctx.fill();
+    gctx.restore();
+  }
+
+  function clearJunctionsForBranch(b){
+    junctions = junctions.filter(j=>{
+      if(j.branch === b){ soilDot(j.x, j.y, 11); return false; }
+      return true;
+    });
+  }
+
+  function killDescendants(rootBranch){
+    for(const br of branches){
+      if(br === rootBranch) continue;
+      if(br.plantId === rootBranch && br.state !== 'decaying' && br.state !== 'gone'){
+        br.path.push({x:br.x,y:br.y});
+        severBranchFromFungus(br);
+        br.state = 'decaying';
+        const dur = clamp(br.path.length*rand(3.5,5.5), 100, 1400);
+        br.decayDots = Math.max(1, Math.ceil(br.path.length/dur));
+        br.decayIndex = 0;
+      }
+    }
+  }
+
   function severBranchFromFungus(b){
     if(b.connected && b.connectedBody){
       const body = b.connectedBody;
       body.connectedBranches.delete(b);
       for(const h of hyphae) if(h.connectedBranch === b) h.alive = false;
       b.connected = false; b.connectedBody = null; b.connectedSpecies = null;
+      clearJunctionsForBranch(b);
     }
     if(b.order === 0 && b.associatedBodies){
       for(const body of b.associatedBodies){
@@ -242,10 +423,19 @@
     }
   }
 
+  function resourceBoostFor(b){
+    if(!(b.connected && b.connectedBody)) return null;
+    const rh = b.connectedBody.resourceHypha;
+    if(rh && rh.alive && rh.resourceLinked && rh.resourceLinked.amount>0) return rh.resourceLinked;
+    return null;
+  }
+
   function updateBranch(b){
     b.age++;
     if(b.state === 'growing'){
       const cfg = ROOT_ORDER[b.order];
+      const boostRes = resourceBoostFor(b);
+
       b.angle += rand(-cfg.jitter, cfg.jitter);
       b.angle += (Math.PI/2 - b.angle) * cfg.gravity * 0.15 + cfg.gravity*0.01;
       const px = b.x, py = b.y;
@@ -262,7 +452,9 @@
       b.distSinceSample += b.speed;
       if(b.distSinceSample > 3){ b.path.push({x:b.x,y:b.y}); b.distSinceSample = 0; }
 
-      b.baseWidth = Math.min(b.widthMax, b.baseWidth + cfg.sec);
+      const wMax = boostRes ? b.widthMax*1.8 : b.widthMax;
+      b.baseWidth = Math.min(wMax, b.baseWidth + cfg.sec*(boostRes?3:1));
+      if(boostRes) boostRes.amount = Math.max(0, boostRes.amount - 0.01);
 
       if(cfg.canBranch){
         b.branchAccum += b.speed;
@@ -273,9 +465,19 @@
         }
       }
 
+      if(b.order < 2 && b.baseWidth > 1.5){
+        b.noduleAccum += b.speed;
+        if(b.noduleAccum > b.noduleInterval){
+          b.noduleAccum = 0;
+          b.noduleInterval = rand(45,75);
+          drawNodule(b.x, b.y, b.baseWidth);
+        }
+      }
+
       if(frame % 40 === 0) thickenRedraw(b);
 
-      if(b.age > b.maxLife || b.y > H+10 || b.x < -30 || b.x > W+30 || b.baseWidth < 0.3){
+      const timeUp = !boostRes && b.age > b.maxLife;
+      if(timeUp || b.y > H+10 || b.x < -30 || b.x > W+30 || b.baseWidth < 0.3){
         b.path.push({x:b.x,y:b.y});
         thickenRedraw(b);
         b.state = 'mature';
@@ -285,49 +487,87 @@
       if(b.matureTimer > b.matureDuration){
         b.state = 'decaying';
         severBranchFromFungus(b);
-        const dur = clamp(b.path.length*rand(1.6,2.6), 60, 500);
+        const dur = clamp(b.path.length*rand(3.5,5.5), 100, 1400);
         b.decayDots = Math.max(1, Math.ceil(b.path.length/dur));
+        if(b.order === 0) killDescendants(b);
       }
     } else if(b.state === 'decaying'){
       for(let k=0;k<b.decayDots && b.decayIndex < b.path.length;k++){
         const p = b.path[b.decayIndex];
         const t = b.decayIndex/b.path.length;
         const r = b.baseWidth*(1-t*(1-b.tipFrac))*0.85 + 1;
-        soilDot(p.x, p.y, r);
+        addRemain(p.x, p.y, r);
         b.decayIndex++;
       }
       if(b.decayIndex >= b.path.length) b.state = 'gone';
     }
   }
 
-  // ---------- fungal bodies & hyphae ----------
+  // ---------- hyphae ----------
+  function makeHypha(species,color,colony,x,y,angle,speed,width){
+    return {
+      species, color, colony, x, y, angle, speed, width,
+      alive:true, connected:false, resourceLinked:null, connectedBranch:null,
+      life:0, deathAge: rand(700,1500),
+      path:[{x,y}], distSinceSample:0,
+      turnBias: rand(-0.03,0.03), turnTimer: Math.floor(rand(20,45)),
+      decaying:false, decayIndex:0, decayDots:1
+    };
+  }
+
+  function spawnHyphaFromBody(body){
+    const pal = SPECIES[body.species];
+    hyphae.push(makeHypha(body.species, pal.hypha, body, body.x, body.y, rand(0,6.28), rand(0.26,0.42), rand(0.8,1.4)));
+  }
+
+  function darkenedHyphaColor(h){
+    const t = clamp(h.life/h.deathAge,0,1)*0.85;
+    return t>0.02 ? lerpColor(h.color, SOIL_DARK, t) : h.color;
+  }
+
+  function hexToRgba(hex,a){ const v=hexToRgb(hex); return `rgba(${v[0]},${v[1]},${v[2]},${a})`; }
+
+  // layered glow (soft halo + mid glow + bright core) so mycelium reads like the reference's "neuron" look
+  function drawFungalGlow(x,y,r,species){
+    const pal = SPECIES[species];
+    gctx.save();
+    gctx.globalCompositeOperation = 'lighter';
+    const halo = gctx.createRadialGradient(x,y,0,x,y,r*3.2);
+    halo.addColorStop(0, hexToRgba(pal.core,0.22));
+    halo.addColorStop(1, hexToRgba(pal.core,0));
+    gctx.fillStyle = halo;
+    gctx.beginPath(); gctx.arc(x,y,r*3.2,0,6.28); gctx.fill();
+    const mid = gctx.createRadialGradient(x,y,0,x,y,r*1.6);
+    mid.addColorStop(0, hexToRgba(pal.core,0.5));
+    mid.addColorStop(1, hexToRgba(pal.core,0));
+    gctx.fillStyle = mid;
+    gctx.beginPath(); gctx.arc(x,y,r*1.6,0,6.28); gctx.fill();
+    gctx.restore();
+    const core = gctx.createRadialGradient(x,y,0,x,y,r);
+    core.addColorStop(0, '#ffffff');
+    core.addColorStop(0.35, pal.core);
+    core.addColorStop(1, 'rgba(80,120,140,0.05)');
+    gctx.fillStyle = core;
+    gctx.beginPath(); gctx.arc(x,y,r,0,6.28); gctx.fill();
+  }
+
+  // ---------- fungal bodies ----------
   function newFungalBody(x,y,species){
     const pal = SPECIES[species];
     const body = {
       x, y, species,
       baseR: rand(6,11), r: 0,
+      maxHyphae: Math.floor(rand(1,6)),
       connectedBranches: new Set(),
+      resourceHypha: null,
       penaltyCount: 0,
       deadPlantIds: new Set(),
       state: 'alive'
     };
     body.r = body.baseR;
-    const grad = gctx.createRadialGradient(x,y,0,x,y,body.r);
-    grad.addColorStop(0, pal.core);
-    grad.addColorStop(1, 'rgba(80,120,140,0.05)');
-    gctx.fillStyle = grad;
-    gctx.beginPath(); gctx.arc(x,y,body.r,0,6.28); gctx.fill();
+    drawFungalGlow(x,y,body.r,species);
     fungalBodies.push(body);
-
-    const n = Math.floor(rand(2,4));
-    for(let i=0;i<n;i++){
-      hyphae.push({
-        species, color: pal.hypha, colony: body,
-        x, y, angle: rand(0,6.28), curve: rand(-0.015,0.015),
-        speed: rand(0.26,0.42), width: rand(0.8,1.4),
-        alive:true, life:0, connected:false, seeking:true, connectedBranch:null
-      });
-    }
+    for(let i=0;i<body.maxHyphae;i++) spawnHyphaFromBody(body);
     return body;
   }
 
@@ -339,32 +579,26 @@
     newFungalBody(rand(W*0.05,W*0.95), rand(H*0.35,H*0.94), species);
   }
 
-  // colony grows visually as more roots feed it
   function growBody(body){
     const target = clamp(body.baseR + body.connectedBranches.size*2.3, body.baseR, body.baseR+32);
     if(target > body.r + 0.4){
       body.r = target;
-      const pal = SPECIES[body.species];
-      const grad = gctx.createRadialGradient(body.x,body.y,0,body.x,body.y,body.r);
-      grad.addColorStop(0, pal.core);
-      grad.addColorStop(1, 'rgba(80,120,140,0.05)');
-      gctx.fillStyle = grad;
-      gctx.beginPath(); gctx.arc(body.x,body.y,body.r,0,6.28); gctx.fill();
+      drawFungalGlow(body.x, body.y, body.r, body.species);
     }
   }
 
-  // a fungal body dies once enough connected plants have died (or it's been grazed down hard enough);
-  // all its hyphae vanish except one short strand, which leads to a fresh body of the same species
   function checkBodyDeath(body){
     if(body.state !== 'alive' || body.penaltyCount < DEATH_THRESHOLD) return;
     body.state = 'gone';
-
     for(let i=0;i<26;i++){
       const a = rand(0,6.28), d = rand(0,body.r);
       soilDot(body.x+Math.cos(a)*d, body.y+Math.sin(a)*d, rand(1.5,3));
     }
     for(const h of hyphae) if(h.colony === body) h.alive = false;
-    for(const br of body.connectedBranches){ br.connected=false; br.connectedBody=null; br.connectedSpecies=null; }
+    for(const br of body.connectedBranches){
+      br.connected=false; br.connectedBody=null; br.connectedSpecies=null;
+      clearJunctionsForBranch(br);
+    }
 
     const angle = rand(0,6.28), len = rand(20,38);
     const nx = clamp(body.x+Math.cos(angle)*len, 12, W-12);
@@ -381,7 +615,7 @@
     let best=null, bestD=maxDist;
     for(const b of branches){
       if(b.state==='decaying' || b.state==='gone') continue;
-      if(b.connected && b.connectedSpecies !== species) continue; // claimed by rival fungus
+      if(b.connected && b.connectedSpecies !== species) continue;
       const d = Math.hypot(b.x-x,b.y-y);
       if(d<bestD){ bestD=d; best=b; }
     }
@@ -399,91 +633,267 @@
   }
 
   function updateHypha(h){
-    h.life++;
-    if(h.seeking && !h.connected){
-      const target = nearestRootTip(h.x,h.y,200,h.species);
-      if(target){
-        const ta = Math.atan2(target.y-h.y, target.x-h.x);
-        h.angle += angDiff(h.angle, ta)*0.06;
-        if(Math.hypot(target.x-h.x, target.y-h.y) < 9){
-          h.connected = true; h.seeking = false; h.connectedBranch = target;
-          target.connected = true; target.connectedSpecies = h.species; target.connectedBody = h.colony;
-          h.colony.connectedBranches.add(target);
-          if(target.plantId && target.plantId.associatedBodies) target.plantId.associatedBodies.add(h.colony);
-          growBody(h.colony);
-          if(target.state==='growing') target.speed *= 1.4;
-          h.speed *= 1.4; h.width *= 1.3;
-          const mx=(h.x+target.x)/2, my=(h.y+target.y)/2;
-          const grad = gctx.createRadialGradient(mx,my,0,mx,my,10);
-          grad.addColorStop(0, GLOW_COLOR); grad.addColorStop(1,'rgba(242,214,117,0)');
-          gctx.fillStyle = grad; gctx.beginPath(); gctx.arc(mx,my,10,0,6.28); gctx.fill();
-          pulses.push({x:mx,y:my,born:frame});
-        }
+    if(h.decaying){
+      for(let k=0;k<h.decayDots && h.decayIndex<h.path.length;k++){
+        soilDot(h.path[h.decayIndex].x, h.path[h.decayIndex].y, h.width*0.9+0.5);
+        h.decayIndex++;
       }
-    } else {
-      h.angle += rand(-0.09,0.09);
+      if(h.decayIndex>=h.path.length) h.alive=false;
+      return;
     }
-    // gentle persistent curvature so hyphae wander in soft arcs, never as straight rays
-    h.curve += rand(-0.004,0.004);
-    h.curve = clamp(h.curve,-0.05,0.05);
-    h.angle += h.curve;
+
+    if(h.resourceLinked && h.resourceLinked.amount<=0) h.resourceLinked = null;
+    const anchored = h.connected || !!h.resourceLinked;
+    if(anchored) return;
+
+    const target = nearestRootTip(h.x,h.y,200,h.species);
+    const resCap = Math.max(1, Math.floor(h.colony.maxHyphae/2));
+    const resLinkedNow = hyphae.reduce((n,o)=> n + (o.alive && o.colony===h.colony && o.resourceLinked ? 1:0), 0);
+    const res = resLinkedNow < resCap ? nearestResource(h.x,h.y,220) : null;
+    let goRes = false;
+    if(res){
+      const dRes = Math.hypot(res.x-h.x,res.y-h.y);
+      const dRoot = target ? Math.hypot(target.x-h.x,target.y-h.y) : Infinity;
+      goRes = dRes < dRoot;
+    }
+
+    if(goRes){
+      const ta = Math.atan2(res.y-h.y, res.x-h.x);
+      h.angle += angDiff(h.angle, ta)*0.05;
+      const contactR = Math.min(res.rx,res.ry)*0.8 + 5;
+      if(Math.hypot(res.x-h.x,res.y-h.y) < contactR){
+        h.resourceLinked = res;
+        h.width = Math.min(2.2, h.width*1.15);
+        if(!h.colony.resourceHypha || !h.colony.resourceHypha.alive) h.colony.resourceHypha = h;
+        gctx.save(); gctx.globalCompositeOperation = 'lighter';
+        const grad = gctx.createRadialGradient(h.x,h.y,0,h.x,h.y,12);
+        grad.addColorStop(0,'rgba(190,220,255,0.9)'); grad.addColorStop(1,'rgba(190,220,255,0)');
+        gctx.fillStyle=grad; gctx.beginPath(); gctx.arc(h.x,h.y,12,0,6.28); gctx.fill();
+        gctx.restore();
+      }
+    } else if(target){
+      const ta = Math.atan2(target.y-h.y, target.x-h.x);
+      h.angle += angDiff(h.angle, ta)*0.06;
+      if(Math.hypot(target.x-h.x, target.y-h.y) < 9){
+        h.connected = true; h.connectedBranch = target;
+        h.width = Math.min(2.4, h.width*1.3);
+        target.connected = true; target.connectedSpecies = h.species; target.connectedBody = h.colony;
+        h.colony.connectedBranches.add(target);
+        if(target.plantId && target.plantId.associatedBodies) target.plantId.associatedBodies.add(h.colony);
+        growBody(h.colony);
+        if(target.state==='growing') target.speed *= 1.3;
+        const mx=(h.x+target.x)/2, my=(h.y+target.y)/2;
+        gctx.save(); gctx.globalCompositeOperation = 'lighter';
+        const grad = gctx.createRadialGradient(mx,my,0,mx,my,13);
+        grad.addColorStop(0, GLOW_COLOR); grad.addColorStop(1,'rgba(242,214,117,0)');
+        gctx.fillStyle = grad; gctx.beginPath(); gctx.arc(mx,my,13,0,6.28); gctx.fill();
+        gctx.restore();
+        pulses.push({x:mx,y:my,born:frame});
+        junctions.push({x:mx,y:my,branch:target});
+        return;
+      }
+    }
+
+    if(h.connected || h.resourceLinked) return;
+
+    h.turnTimer--;
+    if(h.turnTimer<=0){ h.turnBias = rand(-0.05,0.05); h.turnTimer = Math.floor(rand(20,45)); }
+    h.angle += h.turnBias*0.5 + rand(-0.01,0.01);
 
     fungalCombat(h);
     if(!h.alive) return;
+
     const px=h.x, py=h.y;
     h.x += Math.cos(h.angle)*h.speed;
     h.y += Math.sin(h.angle)*h.speed;
-    gctx.strokeStyle = h.color; gctx.globalAlpha=0.5; gctx.lineWidth=h.width; gctx.lineCap='round';
-    gctx.beginPath(); gctx.moveTo(px,py); gctx.lineTo(h.x,h.y); gctx.stroke(); gctx.globalAlpha=1;
+    gctx.save();
+    gctx.shadowColor = h.color;
+    gctx.shadowBlur = 3.5;
+    gctx.strokeStyle = darkenedHyphaColor(h);
+    gctx.globalAlpha=0.6; gctx.lineWidth=h.width; gctx.lineCap='round';
+    gctx.beginPath(); gctx.moveTo(px,py); gctx.lineTo(h.x,h.y); gctx.stroke();
+    gctx.restore();
 
-    if(hyphae.length<200 && chance(0.003) && h.width>0.5){
-      hyphae.push({species:h.species, color:h.color, colony:h.colony, x:h.x,y:h.y,
-        angle:h.angle+rand(-0.5,0.5), curve:rand(-0.015,0.015), speed:h.speed*rand(0.7,0.9),
-        width:h.width*0.6, alive:true, life:0, connected:false, seeking:true, connectedBranch:null});
+    h.distSinceSample += h.speed;
+    if(h.distSinceSample > 4){ h.path.push({x:h.x,y:h.y}); h.distSinceSample = 0; }
+
+    if(hyphae.length<220 && chance(0.0025) && h.width>0.5){
+      hyphae.push(makeHypha(h.species,h.color,h.colony,h.x,h.y, h.angle+rand(-0.5,0.5), h.speed*rand(0.7,0.9), h.width*0.6));
       h.width*=0.92;
     }
-    if(h.x<-20||h.x>W+20||h.y>H+20||h.life>2200||h.width<0.3) h.alive=false;
+
+    h.life++;
+    if(h.life > h.deathAge){
+      h.decaying = true; h.decayIndex = 0;
+      h.decayDots = Math.max(1, Math.ceil(h.path.length/110));
+    }
+    if(h.x<-20||h.x>W+20||h.y>H+20) h.alive=false;
   }
 
-  // ---------- creatures ----------
-  function spawnCreature(){
-    if(creatures.length > 6) return;
-    const type = chance(0.5) ? 'worm' : 'bug';
-    creatures.push({
-      type, x: rand(0,W), y: rand(H*0.15,H*0.95),
-      angle: rand(0,6.28), phase: rand(0,6.28),
-      history: [], baseSpeed: type==='worm' ? rand(0.22,0.34) : rand(0.5,0.8),
-      pauseTimer: 0, moveTimer: Math.floor(rand(20,60)), paused:false
+  // ---------- resource-flow bubbles ----------
+  function spawnBubbles(){
+    for(const body of fungalBodies){
+      if(body.state!=='alive') continue;
+      const rh = body.resourceHypha;
+      if(!(rh && rh.alive && rh.resourceLinked && rh.resourceLinked.amount>0)) continue;
+      if(body.connectedBranches.size===0) continue;
+      const inFlight = bubbles.reduce((n,bb)=> n + (bb.bodyRef===body?1:0), 0);
+      if(inFlight>=2 || !chance(0.01)) continue;
+      const arr = Array.from(body.connectedBranches);
+      const branch = arr[Math.floor(rand(0,arr.length))];
+      const rootHypha = hyphae.find(h=>h.alive && h.colony===body && h.connectedBranch===branch);
+      if(!rootHypha || rh.path.length<2 || rootHypha.path.length<2) continue;
+      const pts = rh.path.slice().reverse().concat(rootHypha.path);
+      bubbles.push({points:pts, idx:0, speed:rand(0.9,1.4), resource:rh.resourceLinked, bodyRef:body});
+    }
+  }
+
+  function updateBubbles(){
+    bubbles = bubbles.filter(bb=>{
+      bb.idx += bb.speed;
+      const i = Math.floor(bb.idx);
+      if(i >= bb.points.length-1){
+        bb.resource.amount = Math.max(0, bb.resource.amount - rand(0.35,0.65));
+        return false;
+      }
+      const p1=bb.points[i], p2=bb.points[i+1], f=bb.idx-i;
+      const x=p1.x+(p2.x-p1.x)*f, y=p1.y+(p2.y-p1.y)*f;
+      const grad = fctx.createRadialGradient(x,y,0,x,y,3.2);
+      grad.addColorStop(0,'rgba(220,245,255,0.95)'); grad.addColorStop(1,'rgba(220,245,255,0)');
+      fctx.fillStyle=grad; fctx.beginPath(); fctx.arc(x,y,3.2,0,6.28); fctx.fill();
+      return true;
     });
   }
 
-  function updateWorm(c){
-    c.angle += Math.sin(frame*0.02 + c.phase)*0.02 + rand(-0.008,0.008);
-    const speed = c.baseSpeed * (0.55 + 0.45*Math.sin(frame*0.05 + c.phase));
-    const margin = 40;
-    if(c.x < margin) c.angle += (Math.PI/2 - Math.abs(angDiff(c.angle,0)))*0.01 + 0.01;
-    if(c.x > W-margin) c.angle -= 0.01;
-    if(c.y < H*0.12+margin) c.angle += 0.01;
-    if(c.y > H-margin) c.angle -= 0.01;
+  // ---------- worm cocoons ----------
+  function spawnCocoon(worm){
+    const len = rand(15,22), wid = rand(6,9);
+    const angle = Math.PI/2 + rand(-0.15,0.15);
+    cocoons.push({x:worm.x, y:worm.y, angle, len, wid, age:0, hatchAge: rand(320,620)});
+    gctx.save();
+    gctx.translate(worm.x, worm.y); gctx.rotate(angle);
+    const grad = gctx.createLinearGradient(-wid/2,0,wid/2,0);
+    grad.addColorStop(0,'#120c08'); grad.addColorStop(0.5,'#2a1c10'); grad.addColorStop(1,'#120c08');
+    gctx.fillStyle = grad;
+    roundRect(gctx, -wid/2, -len/2, wid, len, wid/2);
+    gctx.fill();
+    gctx.restore();
+  }
 
-    c.x += Math.cos(c.angle)*speed;
-    c.y += Math.sin(c.angle)*speed;
-    c.x = clamp(c.x, 0, W); c.y = clamp(c.y, H*0.1, H);
+  function hatchCocoon(cc){
+    gctx.fillStyle='rgba(230,220,200,0.5)';
+    gctx.beginPath(); gctx.arc(cc.x, cc.y-cc.len/2, 2.5, 0,6.28); gctx.fill();
 
+    const n = Math.floor(rand(3,5)); // 3 or 4 hatchlings
+    const stayIndex = Math.floor(rand(0,n));
+    for(let i=0;i<n;i++){
+      const leaving = i !== stayIndex;
+      creatures.push({
+        type:'worm', x:cc.x+rand(-4,4), y:cc.y, phase:rand(0,6.28),
+        history:[], baseSpeed:rand(0.2,0.3), dead:false,
+        stage: leaving ? 'leaving' : 'foraging',
+        foodEaten:0, growThreshold:rand(10,16), size:0.6,
+        burrowTarget: rand(H*0.90,H*0.985),
+        angle: leaving ? (cc.x < W/2 ? Math.PI+rand(-0.3,0.3) : rand(-0.3,0.3)) : (-Math.PI/2 + rand(-0.6,0.6)),
+        pauseTimer:0, moveTimer:0, paused:false
+      });
+    }
+
+    const rx = cc.len*0.6, ry = cc.wid*0.7;
+    const res = { x:cc.x, y:cc.y, rx, ry, rot:cc.angle, tint:'amber', amount: rand(70,150), gone:false };
+    resources.push(res);
+    drawResource(res);
+  }
+
+  // ---------- creatures ----------
+  function spawnCreature(forceType){
+    if(creatures.length > 9) return;
+    const type = forceType || (chance(0.5) ? 'worm' : 'bug');
+    const c = {
+      type, x: rand(0,W), y: rand(H*0.15,H*0.85),
+      angle: rand(0,6.28), phase: rand(0,6.28),
+      history: [], baseSpeed: type==='worm' ? rand(0.22,0.34) : rand(0.5,0.8),
+      pauseTimer: 0, moveTimer: Math.floor(rand(20,60)), paused:false, dead:false
+    };
+    if(type==='worm'){
+      c.stage='foraging'; c.foodEaten=0; c.growThreshold=rand(10,16); c.size=1;
+      c.burrowTarget = rand(H*0.90,H*0.985);
+    }
+    creatures.push(c);
+  }
+
+  function drawWormBody(c){
     c.history.unshift({x:c.x,y:c.y});
     if(c.history.length > 26) c.history.length = 26;
-
     fctx.lineCap = 'round';
     const segCount = 7, step = 3;
     for(let i=0;i<segCount-1;i++){
       const p1 = c.history[i*step], p2 = c.history[(i+1)*step];
       if(!p1||!p2) break;
-      const r = 2.6 * (1 - i/segCount) + 0.6;
+      const r = (2.6 * (1 - i/segCount) + 0.6) * c.size;
       fctx.lineWidth = r*2;
       fctx.strokeStyle = i%2===0 ? '#c98b6b' : '#b87856';
       fctx.beginPath(); fctx.moveTo(p1.x,p1.y); fctx.lineTo(p2.x,p2.y); fctx.stroke();
     }
-    biteNearby(c);
+  }
+
+  function updateWormForage(c){
+    // young worms hunger more keenly and range further to find root remains
+    const young = c.size < 1.2;
+    const seekRadius = young ? 240 : 160;
+    const steerStrength = young ? 0.09 : 0.05;
+    const target = nearestRemain(c.x,c.y,seekRadius);
+    if(target){
+      const ta = Math.atan2(target.y-c.y, target.x-c.x);
+      c.angle += angDiff(c.angle, ta)*steerStrength;
+    } else {
+      c.angle += Math.sin(frame*0.02 + c.phase)*0.02 + rand(-0.008,0.008);
+    }
+    const speed = c.baseSpeed * (0.55 + 0.45*Math.sin(frame*0.05 + c.phase));
+    const margin = 40;
+    if(c.x < margin) c.angle += 0.01;
+    if(c.x > W-margin) c.angle -= 0.01;
+    if(c.y < H*0.12+margin) c.angle += 0.01;
+    if(c.y > H*0.9) c.angle -= 0.01;
+
+    c.x += Math.cos(c.angle)*speed;
+    c.y += Math.sin(c.angle)*speed;
+    c.x = clamp(c.x, 0, W); c.y = clamp(c.y, H*0.1, H*0.94);
+
+    drawWormBody(c);
+
+    if(target && Math.hypot(target.x-c.x,target.y-c.y) < 7){
+      remains = remains.filter(rm=>rm!==target);
+      soilDot(target.x,target.y,target.r);
+      c.foodEaten++; c.size = Math.min(2.2, c.size + 0.18);
+      if(c.foodEaten >= c.growThreshold) c.stage = 'burrowing';
+    }
+  }
+
+  function updateWormBurrow(c){
+    c.angle += (Math.PI/2 - c.angle)*0.05 + rand(-0.02,0.02);
+    const speed = c.baseSpeed*0.8;
+    c.x += Math.cos(c.angle)*speed;
+    c.y += Math.sin(c.angle)*speed;
+    c.x = clamp(c.x,0,W);
+    drawWormBody(c);
+    if(c.y > c.burrowTarget){
+      spawnCocoon(c);
+      c.dead = true;
+    }
+  }
+
+  function updateWormLeaving(c){
+    c.x += Math.cos(c.angle)*c.baseSpeed*1.6;
+    c.y += Math.sin(c.angle)*c.baseSpeed*0.3;
+    drawWormBody(c);
+    if(c.x < -25 || c.x > W+25) c.dead = true;
+  }
+
+  function updateWorm(c){
+    if(c.stage==='burrowing') updateWormBurrow(c);
+    else if(c.stage==='leaving') updateWormLeaving(c);
+    else updateWormForage(c);
   }
 
   function updateBug(c){
@@ -507,7 +917,7 @@
     fctx.strokeStyle = '#3a2418'; fctx.lineWidth = 1;
     for(let i=-1;i<=1;i++){ fctx.beginPath(); fctx.moveTo(i*2,2); fctx.lineTo(i*2+1.5,6); fctx.stroke(); }
     fctx.restore();
-    biteNearby(c);
+    bugBite(c);
   }
 
   function biteMark(x,y){
@@ -515,22 +925,21 @@
     gctx.beginPath(); gctx.arc(x,y,2.6,0,6.28); gctx.fill();
   }
 
-  function biteNearby(c){
+  // only bugs still prey on living roots, hyphae and mycelium; worms live off root remains instead
+  function bugBite(c){
     for(const b of branches){
       if(b.state!=='growing') continue;
       if(Math.hypot(b.x-c.x,b.y-c.y) < 9 && chance(0.01)){
-        b.state='mature'; b.matureTimer=b.matureDuration+1; // push straight past maturity into decay soon
+        b.state='mature'; b.matureTimer=b.matureDuration+1;
         biteMark(b.x,b.y);
       }
     }
     for(const h of hyphae){
-      if(!h.alive) continue;
+      if(!h.alive || h.decaying) continue;
       if(Math.hypot(h.x-c.x,h.y-c.y) < 8 && chance(0.09)){
         h.alive=false; biteMark(h.x,h.y);
       }
     }
-    // bugs and worms also graze directly on the mycelium body itself, which slowly
-    // undermines the colony's vitality and balances its growth off the roots' resources
     for(const body of fungalBodies){
       if(body.state!=='alive') continue;
       if(Math.hypot(body.x-c.x,body.y-c.y) < body.r+6 && chance(0.012)){
@@ -543,9 +952,13 @@
   }
 
   function seedWorld(){
+    spawnResources();
     for(let i=0;i<plantCap();i++) spawnRoot(rand(W*0.06,W*0.94));
     for(let i=0;i<colonyCap();i++) spawnFungus();
-    for(let i=0;i<3;i++) spawnCreature();
+    const wormCount = Math.floor(rand(2,4));
+    for(let i=0;i<wormCount;i++) spawnCreature('worm');
+    const bugCount = Math.floor(rand(2,4));
+    for(let i=0;i<bugCount;i++) spawnCreature('bug');
   }
 
   function step(){
@@ -556,14 +969,44 @@
     for(const h of hyphae) if(h.alive) updateHypha(h);
     hyphae = hyphae.filter(h => h.alive);
 
+    for(const body of fungalBodies){
+      if(body.state!=='alive') continue;
+      const count = hyphae.reduce((n,h)=> n + (h.colony===body && h.alive ? 1:0), 0);
+      if(count < body.maxHyphae && chance(0.02)) spawnHyphaFromBody(body);
+    }
+
+    for(const r of resources){
+      if(r.gone) continue;
+      const linked = hyphae.some(h=>h.alive && h.resourceLinked===r);
+      if(linked) r.amount = Math.max(0, r.amount - 0.0025);
+      checkResourceDepletion(r);
+    }
+    spawnBubbles();
+
+    remains = remains.filter(rm=>{
+      rm.age++;
+      if(rm.age>rm.maxAge){ soilDot(rm.x,rm.y,rm.r); return false; }
+      return true;
+    });
+
+    cocoons = cocoons.filter(cc=>{
+      cc.age++;
+      if(cc.age>cc.hatchAge){ hatchCocoon(cc); return false; }
+      return true;
+    });
+
     if(chance(0.006)) spawnFungus();
     if(chance(0.003)) spawnRoot(rand(W*0.04,W*0.96));
-    if(chance(0.003)) spawnCreature();
+    if(chance(0.003)) spawnCreature('bug'); // worm population is balanced by the cocoon cycle instead
+    const wormsAlive = creatures.some(c=>c.type==='worm');
+    if(!wormsAlive && cocoons.length===0 && chance(0.02)) spawnCreature('worm'); // safety net so worms never fully vanish
 
     fctx.clearRect(0,0,W,H);
     for(const c of creatures){
       if(c.type==='worm') updateWorm(c); else updateBug(c);
     }
+    creatures = creatures.filter(c=>!c.dead);
+    updateBubbles();
 
     pulses = pulses.filter(p => frame - p.born < 40);
     for(const p of pulses){
